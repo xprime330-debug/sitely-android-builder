@@ -1,0 +1,82 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:        { description: "Sitely build id",     required: true }
+      site_id:         { description: "Sitely site id",      required: true }
+      site_url:        { description: "URL to wrap",         required: true }
+      app_name:        { description: "App display name",    required: true }
+      package_id:      { description: "Android package id",  required: true }
+      icon_url:        { description: "Icon URL (png)",      required: false, default: "" }
+      splash_color:    { description: "Splash bg color",     required: false, default: "#0B0B1A" }
+      theme_color:     { description: "Theme color",         required: false, default: "#4F46E5" }
+      callback_url:    { description: "Sitely webhook URL",  required: true }
+      callback_secret: { description: "Shared webhook secret", required: true }
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+
+      - uses: actions/setup-java@v4
+        with: { distribution: "temurin", java-version: "17" }
+
+      - name: Install deps
+        run: npm install
+
+      - name: Prepare Capacitor config & assets
+        env:
+          APP_NAME:     ${{ inputs.app_name }}
+          PACKAGE_ID:   ${{ inputs.package_id }}
+          SITE_URL:     ${{ inputs.site_url }}
+          ICON_URL:     ${{ inputs.icon_url }}
+          SPLASH_COLOR: ${{ inputs.splash_color }}
+          THEME_COLOR:  ${{ inputs.theme_color }}
+        run: node scripts/prepare.mjs
+
+      - name: Add Android platform
+        run: npx cap add android && npx cap sync android
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug
+
+      - name: Rename APK
+        run: |
+          mkdir -p out
+          cp android/app/build/outputs/apk/debug/app-debug.apk "out/${{ inputs.build_id }}.apk"
+
+      - name: Upload to R2
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT:           ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET:             ${{ secrets.R2_BUCKET }}
+          R2_PUBLIC_BASE:        ${{ secrets.R2_PUBLIC_BASE }}
+        run: |
+          aws s3 cp "out/${{ inputs.build_id }}.apk" \
+            "s3://${R2_BUCKET}/${{ inputs.build_id }}.apk" \
+            --endpoint-url "${R2_ENDPOINT}" \
+            --content-type application/vnd.android.package-archive
+          echo "APK_URL=${R2_PUBLIC_BASE%/}/${{ inputs.build_id }}.apk" >> $GITHUB_ENV
+
+      - name: Notify Sitely (success)
+        if: success()
+        run: |
+          curl -fsS -X POST "${{ inputs.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -H "X-Sitely-Secret: ${{ inputs.callback_secret }}" \
+            -d "{\"build_id\":\"${{ inputs.build_id }}\",\"status\":\"ready\",\"apk_url\":\"${APK_URL}\",\"github_run_id\":\"${{ github.run_id }}\"}"
+
+      - name: Notify Sitely (failure)
+        if: failure()
+        run: |
+          curl -fsS -X POST "${{ inputs.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -H "X-Sitely-Secret: ${{ inputs.callback_secret }}" \
+            -d "{\"build_id\":\"${{ inputs.build_id }}\",\"status\":\"failed\",\"error_message\":\"Build failed. See run ${{ github.run_id }}.\",\"github_run_id\":\"${{ github.run_id }}\"}"
