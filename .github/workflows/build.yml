@@ -14,6 +14,9 @@ on:
       callback_url:    { description: "Sitely webhook URL",  required: true }
       callback_secret: { description: "Shared webhook secret", required: true }
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -51,19 +54,23 @@ jobs:
           mkdir -p out
           cp android/app/build/outputs/apk/debug/app-debug.apk "out/${{ inputs.build_id }}.apk"
 
-      - name: Upload to R2
-        env:
-          AWS_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ENDPOINT:           ${{ secrets.R2_ENDPOINT }}
-          R2_BUCKET:             ${{ secrets.R2_BUCKET }}
-          R2_PUBLIC_BASE:        ${{ secrets.R2_PUBLIC_BASE }}
+      - name: Publish APK as GitHub Release asset
+        id: release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ inputs.build_id }}
+          name: "${{ inputs.app_name }} (${{ inputs.build_id }})"
+          body: |
+            APK for **${{ inputs.app_name }}**
+            Source: ${{ inputs.site_url }}
+            Sitely build id: `${{ inputs.build_id }}`
+          files: out/${{ inputs.build_id }}.apk
+          fail_on_unmatched_files: true
+
+      - name: Compute APK URL
         run: |
-          aws s3 cp "out/${{ inputs.build_id }}.apk" \
-            "s3://${R2_BUCKET}/${{ inputs.build_id }}.apk" \
-            --endpoint-url "${R2_ENDPOINT}" \
-            --content-type application/vnd.android.package-archive
-          echo "APK_URL=${R2_PUBLIC_BASE%/}/${{ inputs.build_id }}.apk" >> $GITHUB_ENV
+          APK_URL="https://github.com/${{ github.repository }}/releases/download/build-${{ inputs.build_id }}/${{ inputs.build_id }}.apk"
+          echo "APK_URL=$APK_URL" >> $GITHUB_ENV
 
       - name: Notify Sitely (success)
         if: success()
