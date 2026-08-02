@@ -81,6 +81,23 @@ for (const check of checks) {
   }
 }
 
+
+// The default Capacitor vector foreground must not survive into the APK.
+if (manifest.sources?.icon) {
+  const strays = [];
+  const zip2 = await open(apk);
+  try {
+    for await (const entry of zip2) {
+      if (/(^|\/)drawable[^/]*\/ic_launcher_foreground\.xml$/.test(entry.filename)) strays.push(entry.filename);
+    }
+  } finally {
+    await zip2.close();
+  }
+  if (strays.length) {
+    problems.push(`Default vector foreground packaged in APK: ${strays.join(", ")} — Android 8+ would draw it instead of the generated icon.`);
+  }
+}
+
 if (problems.length) {
   const head = `APK asset validation failed for build ${manifest.build_id}: packaged artwork does not match the generated icon/splash.`;
   console.error(`\n::error::${head}`);

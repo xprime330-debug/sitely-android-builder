@@ -50,6 +50,26 @@ if (problems.length) {
   );
 }
 
+
+// Adaptive-icon wiring: Android 8+ launchers must draw OUR png foreground.
+if (wantIcon) {
+  const adaptive = `${RES_DIR}/mipmap-anydpi-v26/ic_launcher.xml`;
+  if (!existsSync(adaptive)) {
+    fail(`Adaptive icon descriptor missing: ${adaptive}. Android 8+ would fall back to the default icon.`);
+  }
+  const xml = readFileSync(adaptive, "utf8");
+  if (!xml.includes("@mipmap/ic_launcher_foreground")) {
+    fail(`${adaptive} does not point at @mipmap/ic_launcher_foreground — the default Capacitor vector would be drawn instead.\n${xml}`);
+  }
+  for (const stale of [
+    `${RES_DIR}/drawable/ic_launcher_foreground.xml`,
+    `${RES_DIR}/drawable-v24/ic_launcher_foreground.xml`,
+    `${RES_DIR}/drawable-anydpi-v24/ic_launcher_foreground.xml`,
+  ]) {
+    if (existsSync(stale)) fail(`Default vector foreground still present: ${stale}.`);
+  }
+}
+
 console.log(
   `Asset validation passed: ${expected.length} launcher/splash resources under ${RES_DIR} match build ${manifest.build_id}` +
     ` (icon ${wantIcon ? manifest.sources.icon.sha256.slice(0, 12) : "n/a"}, splash ${wantSplash ? manifest.sources.splash.sha256.slice(0, 12) : "n/a"}).`,
