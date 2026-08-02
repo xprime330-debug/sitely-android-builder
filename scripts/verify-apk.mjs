@@ -1,9 +1,10 @@
-// Step 6 (post-compile gate). Reads res/mipmap-xxxhdpi/ic_launcher.png and
-// drawable/splash.png out of the packaged APK and compares them against the
-// resources we generated. Catches any packaging-level regression that would
-// ship the default Capacitor artwork.
+// Step 6 (post-compile gate). Pulls the launcher icon and splash out of the
+// packaged APK and compares their PIXELS against the resources we generated.
+// Byte comparison is not usable here: aapt2 re-encodes ("crunches") PNGs and
+// appends density qualifiers such as `-v4` to resource folder names.
 import { readFileSync } from "node:fs";
 import { open } from "yauzl-promise";
+import sharp from "sharp";
 import { sha256 } from "./asset-pipeline.mjs";
 
 const apk = process.argv[2];
@@ -15,37 +16,68 @@ if (!manifest.generated) {
   process.exit(0);
 }
 
+async function pixels(buf) {
+  const { data, info } = await sharp(buf).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  return { hash: sha256(data), dims: `${info.width}x${info.height}` };
+}
+
 const checks = [];
 if (manifest.sources?.icon) {
-  checks.push(["res/mipmap-xxxhdpi/ic_launcher.png", "android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png"]);
-  checks.push(["res/mipmap-xxxhdpi/ic_launcher_round.png", "android/app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png"]);
+  checks.push({
+    label: "launcher icon (xxxhdpi)",
+    match: /(^|\/)mipmap-xxxhdpi[^/]*\/ic_launcher\.png$/,
+    local: "android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png",
+  });
+  checks.push({
+    label: "round launcher icon (xxxhdpi)",
+    match: /(^|\/)mipmap-xxxhdpi[^/]*\/ic_launcher_round\.png$/,
+    local: "android/app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png",
+  });
 }
 if (manifest.sources?.splash) {
-  checks.push(["res/drawable/splash.png", "android/app/src/main/res/drawable/splash.png"]);
+  checks.push({
+    label: "splash image",
+    match: /(^|\/)drawable[^/]*\/splash\.png$/,
+    local: "android/app/src/main/res/drawable/splash.png",
+  });
 }
 
-const wanted = new Map(checks.map(([inApk, onDisk]) => [inApk, sha256(readFileSync(onDisk))]));
-const found = new Map();
-
+// Collect every candidate entry from the APK in one pass.
+const entries = new Map();
 const zip = await open(apk);
 try {
   for await (const entry of zip) {
-    if (!wanted.has(entry.filename)) continue;
+    if (!checks.some((c) => c.match.test(entry.filename))) continue;
     const stream = await entry.openReadStream();
     const chunks = [];
     for await (const chunk of stream) chunks.push(chunk);
-    found.set(entry.filename, sha256(Buffer.concat(chunks)));
+    entries.set(entry.filename, Buffer.concat(chunks));
   }
 } finally {
   await zip.close();
 }
 
 const problems = [];
-for (const [name, expectedHash] of wanted) {
-  const actual = found.get(name);
-  if (!actual) problems.push(`MISSING from APK: ${name}`);
-  else if (actual !== expectedHash) {
-    problems.push(`MISMATCH in APK: ${name}\n           apk: ${actual}\n           expected: ${expectedHash}`);
+for (const check of checks) {
+  const names = [...entries.keys()].filter((n) => check.match.test(n));
+  if (names.length === 0) {
+    problems.push(`MISSING from APK: ${check.label} (no entry matching ${check.match})`);
+    continue;
+  }
+  const want = await pixels(readFileSync(check.local));
+  let ok = false;
+  const seen = [];
+  for (const name of names) {
+    const got = await pixels(entries.get(name));
+    seen.push(`${name} -> ${got.dims} ${got.hash.slice(0, 12)}`);
+    if (got.hash === want.hash && got.dims === want.dims) ok = true;
+  }
+  if (ok) {
+    console.log(`OK  ${check.label}: ${want.dims} pixels match ${want.hash.slice(0, 12)}`);
+  } else {
+    problems.push(
+      `MISMATCH in APK: ${check.label}\n           expected: ${want.dims} ${want.hash.slice(0, 12)}\n           found:    ${seen.join("\n                     ")}`,
+    );
   }
 }
 
@@ -56,4 +88,4 @@ if (problems.length) {
   process.exit(1);
 }
 
-console.log(`APK asset validation passed: ${wanted.size} packaged resource(s) match build ${manifest.build_id}.`);
+console.log(`APK asset validation passed: ${checks.length} packaged resource(s) match build ${manifest.build_id}.`);
