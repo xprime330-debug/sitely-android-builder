@@ -4,11 +4,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "prepare-config": "node scripts/prepare.mjs"
+    "prepare-config": "node scripts/prepare.mjs",
+    "apply-assets": "node scripts/apply-assets.mjs",
+    "verify-assets": "node scripts/verify-assets.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^6.1.2",
     "@capacitor/cli": "^6.1.2",
-    "@capacitor/core": "^6.1.2"
+    "@capacitor/core": "^6.1.2",
+    "@capacitor/splash-screen": "^6.0.2",
+    "sharp": "^0.33.5",
+    "yauzl-promise": "^4.0.0"
   }
 }

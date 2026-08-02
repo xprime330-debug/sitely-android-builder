@@ -9,6 +9,7 @@ on:
       app_name:        { description: "App display name",    required: true }
       package_id:      { description: "Android package id",  required: true }
       icon_url:        { description: "Icon URL (png)",      required: false, default: "" }
+      splash_url:      { description: "Splash image URL",    required: false, default: "" }
       splash_color:    { description: "Splash bg color",     required: false, default: "#0B0B1A" }
       theme_color:     { description: "Theme color",         required: false, default: "#4F46E5" }
       callback_url:    { description: "Sitely webhook URL",  required: true }
@@ -29,21 +30,42 @@ jobs:
       - uses: actions/setup-java@v4
         with: { distribution: "temurin", java-version: "17" }
 
+      # No dependency cache for the Android project: `android/` is generated
+      # fresh by `cap add android` on every run, so res/ can never be stale.
       - name: Install deps
         run: npm install
 
-      - name: Prepare Capacitor config & assets
+      # 1. Config + download this build's icon/splash. Fails hard on a bad URL.
+      - name: Prepare Capacitor config & download assets
         env:
+          BUILD_ID:     ${{ inputs.build_id }}
           APP_NAME:     ${{ inputs.app_name }}
           PACKAGE_ID:   ${{ inputs.package_id }}
           SITE_URL:     ${{ inputs.site_url }}
           ICON_URL:     ${{ inputs.icon_url }}
+          SPLASH_URL:   ${{ inputs.splash_url }}
           SPLASH_COLOR: ${{ inputs.splash_color }}
           THEME_COLOR:  ${{ inputs.theme_color }}
         run: node scripts/prepare.mjs
 
+      # 2. Scaffold the Android project (writes DEFAULT Capacitor icons).
       - name: Add Android platform
         run: npx cap add android && npx cap sync android
+
+      # 3. Overwrite every launcher/splash resource with this build's assets.
+      #    Sequential by design: gradle never runs before this completes.
+      - name: Apply generated icon & splash resources
+        run: node scripts/apply-assets.mjs
+
+      # 4. Hard gate: on-disk resources must hash-match the generated assets.
+      - name: Validate icon & splash resources
+        run: node scripts/verify-assets.mjs
+
+      - name: Show launcher resources (diagnostics)
+        run: |
+          ls -l android/app/src/main/res/mipmap-*/ || true
+          ls -l android/app/src/main/res/drawable*/splash.png || true
+          cat asset-manifest.json
 
       - name: Build debug APK
         working-directory: android
@@ -53,6 +75,11 @@ jobs:
         run: |
           mkdir -p out
           cp android/app/build/outputs/apk/debug/app-debug.apk "out/${{ inputs.build_id }}.apk"
+
+      # 5. Post-compile proof: the icon inside the APK must match the resource
+      #    we generated, so a packaging quirk can't reintroduce the default.
+      - name: Verify icon inside the APK
+        run: node scripts/verify-apk.mjs "out/${{ inputs.build_id }}.apk"
 
       - name: Publish APK as GitHub Release asset
         id: release
