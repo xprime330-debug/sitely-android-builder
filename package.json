@@ -6,7 +6,9 @@
   "scripts": {
     "prepare-config": "node scripts/prepare.mjs",
     "apply-assets": "node scripts/apply-assets.mjs",
-    "verify-assets": "node scripts/verify-assets.mjs"
+    "verify-assets": "node scripts/verify-assets.mjs",
+    "apply-native": "node scripts/apply-native.mjs",
+    "verify-native": "node scripts/verify-native.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^6.1.2",
