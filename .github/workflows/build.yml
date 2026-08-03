@@ -12,6 +12,7 @@ on:
       splash_url:      { description: "Splash image URL",    required: false, default: "" }
       splash_color:    { description: "Splash bg color",     required: false, default: "#0B0B1A" }
       theme_color:     { description: "Theme color",         required: false, default: "#4F46E5" }
+      native_json:     { description: "Native opts JSON (redirect_scheme, external_links, expects_google_auth)", required: false, default: "{}" }
       callback_url:    { description: "Sitely webhook URL",  required: true }
       callback_secret: { description: "Shared webhook secret", required: true }
 
@@ -46,6 +47,7 @@ jobs:
           SPLASH_URL:   ${{ inputs.splash_url }}
           SPLASH_COLOR: ${{ inputs.splash_color }}
           THEME_COLOR:  ${{ inputs.theme_color }}
+          NATIVE_JSON:  ${{ inputs.native_json }}
         run: node scripts/prepare.mjs
 
       # 2. Scaffold the Android project (writes DEFAULT Capacitor icons).
@@ -57,9 +59,22 @@ jobs:
       - name: Apply generated icon & splash resources
         run: node scripts/apply-assets.mjs
 
+      # 3b. Wire the in-app link handler + Custom Tabs OAuth layer.
+      - name: Apply native link & OAuth layer
+        env:
+          SITE_URL:   ${{ inputs.site_url }}
+          PACKAGE_ID: ${{ inputs.package_id }}
+          APP_NAME:   ${{ inputs.app_name }}
+        run: node scripts/apply-native.mjs
+
       # 4. Hard gate: on-disk resources must hash-match the generated assets.
       - name: Validate icon & splash resources
         run: node scripts/verify-assets.mjs
+
+      - name: Validate native OAuth / link wiring
+        env:
+          PACKAGE_ID: ${{ inputs.package_id }}
+        run: node scripts/verify-native.mjs
 
       - name: Show launcher resources (diagnostics)
         run: |
@@ -80,6 +95,10 @@ jobs:
       #    we generated, so a packaging quirk can't reintroduce the default.
       - name: Verify icon inside the APK
         run: node scripts/verify-apk.mjs "out/${{ inputs.build_id }}.apk"
+
+      # 6. Post-compile proof for the OAuth layer.
+      - name: Verify OAuth wiring inside the APK
+        run: node scripts/verify-apk-oauth.mjs "out/${{ inputs.build_id }}.apk"
 
       - name: Publish APK as GitHub Release asset
         id: release
