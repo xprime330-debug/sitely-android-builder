@@ -6,6 +6,7 @@
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
+import { schemeFor, allowNavigationFor, htmlLooksLikeGoogleAuth } from "./native-config.mjs";
 
 const {
   BUILD_ID = "unknown",
@@ -16,13 +17,32 @@ const {
   SPLASH_URL = "",
   SPLASH_COLOR = "#0B0B1A",
   THEME_COLOR = "#4F46E5",
+  NATIVE_JSON = "{}",
 } = process.env;
+
+// Extra per-build native options, packed into one workflow input because
+// workflow_dispatch caps the number of inputs.
+let nativeOpts = {};
+try {
+  nativeOpts = JSON.parse(NATIVE_JSON || "{}");
+} catch {
+  throw new Error("native_json input is not valid JSON.");
+}
+const redirectScheme = nativeOpts.redirect_scheme || schemeFor(PACKAGE_ID);
+const externalLinks = nativeOpts.external_links === "external_browser" ? "external_browser" : "in_app";
 
 const config = {
   appId: PACKAGE_ID,
   appName: APP_NAME,
   webDir: "www",
-  server: { url: SITE_URL, cleartext: false, androidScheme: "https" },
+  server: {
+    url: SITE_URL,
+    cleartext: false,
+    androidScheme: "https",
+    // Same-site navigation stays in the app's own WebView instead of being
+    // handed to the system browser.
+    allowNavigation: allowNavigationFor(SITE_URL),
+  },
   android: { backgroundColor: SPLASH_COLOR },
   plugins: {
     SplashScreen: {
@@ -67,7 +87,37 @@ async function download(label, url) {
 }
 
 mkdirSync("resources", { recursive: true });
-const manifest = { build_id: BUILD_ID, background: SPLASH_COLOR, theme: THEME_COLOR, sources: {} };
+// Does the target site actually offer Google Sign-In? If so the native OAuth
+// wiring is mandatory for this build and verify-native.mjs will say why on
+// failure. Detection is OR-ed with whatever Sitely told us.
+let expectsGoogleAuth = Boolean(nativeOpts.expects_google_auth);
+if (!expectsGoogleAuth) {
+  try {
+    const res = await fetch(SITE_URL, {
+      redirect: "follow",
+      headers: { "User-Agent": "SitelyBuilder/1.0" },
+    });
+    if (res.ok) {
+      const html = (await res.text()).slice(0, 400_000);
+      expectsGoogleAuth = htmlLooksLikeGoogleAuth(html);
+    }
+  } catch (err) {
+    console.log(`Google Sign-In detection skipped: ${err.message}`);
+  }
+}
+console.log(`Google Sign-In expected for this build: ${expectsGoogleAuth}`);
+
+const manifest = {
+  build_id: BUILD_ID,
+  background: SPLASH_COLOR,
+  theme: THEME_COLOR,
+  sources: {},
+  native: {
+    redirect_scheme: redirectScheme,
+    external_links: externalLinks,
+    expects_google_auth: expectsGoogleAuth,
+  },
+};
 
 if (ICON_URL) {
   const buf = await download("Icon", ICON_URL);
