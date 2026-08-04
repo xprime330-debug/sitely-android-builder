@@ -76,6 +76,11 @@ ${pathList}
     settings.setSupportMultipleWindows(false);
     settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
 
+    // Google rejects OAuth from any user agent containing "wv"
+    // (disallowed_useragent). Presenting a plain Chrome UA keeps every
+    // non-OAuth page working and lets the Custom Tab hand-off look native.
+    settings.setUserAgentString(stripWebViewMarker(settings.getUserAgentString()));
+
     CookieManager cookieManager = CookieManager.getInstance();
     cookieManager.setAcceptCookie(true);
     cookieManager.setAcceptThirdPartyCookies(webView, true);
@@ -145,6 +150,21 @@ ${pathList}
     }
   }
 
+  private static String stripWebViewMarker(String ua) {
+    if (ua == null || ua.isEmpty()) return ua;
+    return ua.replace("; wv", "").replace(" wv)", ")").replace(" wv ", " ");
+  }
+
+  /** True when the provider has explicitly rejected an embedded user agent. */
+  private static boolean isBlockedAgentUrl(Uri uri) {
+    if (uri == null) return false;
+    String full = uri.toString().toLowerCase();
+    return full.contains("disallowed_useragent")
+        || full.contains("/sorry/")
+        || full.contains("error=embedded")
+        || full.contains("browser_not_supported");
+  }
+
   private static boolean isOAuthUrl(Uri uri) {
     if (uri == null) return false;
     String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase();
@@ -199,8 +219,21 @@ ${pathList}
         return true;
       }
 
-      if (isOAuthUrl(uri)) {
+      // OAuth policy:
+      //  * With the "wv" marker stripped from our user agent, Google accepts
+      //    the sign-in flow in this WebView, which is the only lane that shares
+      //    cookies with the site — so the post-login redirect lands back on the
+      //    site already authenticated.
+      //  * If a provider still refuses the embedded agent (it answers with
+      //    disallowed_useragent / /sorry/), we hand that exact URL to Chrome
+      //    Custom Tabs, and the custom-scheme deep link brings the user back.
+      if (isBlockedAgentUrl(uri)) {
         openCustomTab(uri);
+        return true;
+      }
+
+      if (isOAuthUrl(uri)) {
+        view.loadUrl(uri.toString());
         return true;
       }
 
