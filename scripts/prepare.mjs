@@ -1,12 +1,13 @@
 // Step 1 of the asset pipeline.
 // Writes capacitor.config.json + www placeholder, then downloads the icon and
-// splash image for THIS build and records their hashes in asset-manifest.json.
-// Any download problem is fatal: we never silently fall back to the default
-// Capacitor icon.
+// splash image for THIS build, normalises them to PNG and records their hashes
+// in asset-manifest.json. Any download problem is fatal with the real reason:
+// we never silently fall back to the default Capacitor icon.
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { schemeFor, allowNavigationFor, htmlLooksLikeGoogleAuth } from "./native-config.mjs";
+import { normalizeToPng } from "./image.mjs";
 
 const {
   BUILD_ID = "unknown",
@@ -20,8 +21,6 @@ const {
   NATIVE_JSON = "{}",
 } = process.env;
 
-// Extra per-build native options, packed into one workflow input because
-// workflow_dispatch caps the number of inputs.
 let nativeOpts = {};
 try {
   nativeOpts = JSON.parse(NATIVE_JSON || "{}");
@@ -39,8 +38,6 @@ const config = {
     url: SITE_URL,
     cleartext: false,
     androidScheme: "https",
-    // Same-site navigation stays in the app's own WebView instead of being
-    // handed to the system browser.
     allowNavigation: allowNavigationFor(SITE_URL),
   },
   android: { backgroundColor: SPLASH_COLOR },
@@ -67,29 +64,26 @@ font-family:-apple-system,system-ui,sans-serif;display:grid;place-items:center;t
 <script>location.href=${JSON.stringify(SITE_URL)}</script>`,
 );
 
-async function download(label, url) {
-  const res = await fetch(url, { redirect: "follow" });
+async function download(label, url, minSide) {
+  let res;
+  try {
+    res = await fetch(url, {
+      redirect: "follow",
+      headers: { "User-Agent": "SitelyBuilder/1.0", Accept: "image/*,*/*" },
+    });
+  } catch (err) {
+    throw new Error(`${label} download failed: ${err.message} (${url})`);
+  }
   if (!res.ok) {
     throw new Error(`${label} download failed: HTTP ${res.status} for ${url}`);
   }
   const buf = Buffer.from(await res.arrayBuffer());
-  if (buf.length < 1024) {
-    throw new Error(`${label} download too small (${buf.length} bytes) — not a usable image.`);
-  }
-  const isPng = buf.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-  const isJpg = buf[0] === 0xff && buf[1] === 0xd8;
-  const isWebp = buf.subarray(0, 4).toString() === "RIFF" && buf.subarray(8, 12).toString() === "WEBP";
-  if (!isPng && !isJpg && !isWebp) {
-    throw new Error(`${label} is not a PNG/JPEG/WebP image.`);
-  }
-  console.log(`${label} downloaded: ${buf.length} bytes`);
-  return buf;
+  if (buf.length === 0) throw new Error(`${label} download returned 0 bytes (${url}).`);
+  return normalizeToPng(label, buf, minSide);
 }
 
 mkdirSync("resources", { recursive: true });
-// Does the target site actually offer Google Sign-In? If so the native OAuth
-// wiring is mandatory for this build and verify-native.mjs will say why on
-// failure. Detection is OR-ed with whatever Sitely told us.
+
 let expectsGoogleAuth = Boolean(nativeOpts.expects_google_auth);
 if (!expectsGoogleAuth) {
   try {
@@ -120,7 +114,7 @@ const manifest = {
 };
 
 if (ICON_URL) {
-  const buf = await download("Icon", ICON_URL);
+  const buf = await download("Icon", ICON_URL, 512);
   writeFileSync("resources/icon.png", buf);
   manifest.sources.icon = { url: ICON_URL, bytes: buf.length, sha256: createHash("sha256").update(buf).digest("hex") };
 } else {
@@ -128,7 +122,7 @@ if (ICON_URL) {
 }
 
 if (SPLASH_URL) {
-  const buf = await download("Splash", SPLASH_URL);
+  const buf = await download("Splash", SPLASH_URL, 512);
   writeFileSync("resources/splash.png", buf);
   manifest.sources.splash = { url: SPLASH_URL, bytes: buf.length, sha256: createHash("sha256").update(buf).digest("hex") };
 } else {
