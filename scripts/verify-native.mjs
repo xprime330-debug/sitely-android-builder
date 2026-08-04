@@ -39,10 +39,15 @@ if (!existsSync(javaPath)) {
     java.includes(`REDIRECT_SCHEME = "${scheme}"`),
     `MainActivity redirect scheme does not match this build (${scheme})`,
   );
-  // The failure mode we are guarding against: OAuth loaded in the WebView.
+  // The failure mode we are guarding against: an embedded user agent that
+  // Google rejects, with no escape hatch to a real browser.
   need(
-    !/isOAuthUrl\(uri\)\)\s*\{\s*view\.loadUrl/.test(java),
-    "OAuth URLs would be loaded in the embedded WebView (disallowed_useragent)",
+    java.includes("stripWebViewMarker"),
+    "WebView user agent still advertises 'wv' (Google answers disallowed_useragent)",
+  );
+  need(
+    java.includes("isBlockedAgentUrl"),
+    "No Custom Tabs escape hatch for providers that reject the embedded agent",
   );
 }
 
