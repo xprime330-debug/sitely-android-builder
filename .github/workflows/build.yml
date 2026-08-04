@@ -19,9 +19,17 @@ on:
 permissions:
   contents: write
 
+# Every step mirrors its output into build.log so the failure webhook can send
+# Sitely the REAL error text instead of a generic "see the run" message.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      BUILD_LOG: ${{ github.workspace }}/build.log
     steps:
       - uses: actions/checkout@v4
 
@@ -31,12 +39,13 @@ jobs:
       - uses: actions/setup-java@v4
         with: { distribution: "temurin", java-version: "17" }
 
-      # No dependency cache for the Android project: `android/` is generated
-      # fresh by `cap add android` on every run, so res/ can never be stale.
       - name: Install deps
-        run: npm install
+        run: |
+          set -o pipefail
+          npm install 2>&1 | tee -a "$BUILD_LOG"
 
-      # 1. Config + download this build's icon/splash. Fails hard on a bad URL.
+      # 1. Config + download/normalise this build's icon/splash. Fails hard on a
+      #    bad URL or an undecodable image, with the real reason.
       - name: Prepare Capacitor config & download assets
         env:
           BUILD_ID:     ${{ inputs.build_id }}
@@ -48,16 +57,22 @@ jobs:
           SPLASH_COLOR: ${{ inputs.splash_color }}
           THEME_COLOR:  ${{ inputs.theme_color }}
           NATIVE_JSON:  ${{ inputs.native_json }}
-        run: node scripts/prepare.mjs
+        run: |
+          set -o pipefail
+          node scripts/prepare.mjs 2>&1 | tee -a "$BUILD_LOG"
 
       # 2. Scaffold the Android project (writes DEFAULT Capacitor icons).
       - name: Add Android platform
-        run: npx cap add android && npx cap sync android
+        run: |
+          set -o pipefail
+          npx cap add android 2>&1 | tee -a "$BUILD_LOG"
+          npx cap sync android 2>&1 | tee -a "$BUILD_LOG"
 
       # 3. Overwrite every launcher/splash resource with this build's assets.
-      #    Sequential by design: gradle never runs before this completes.
       - name: Apply generated icon & splash resources
-        run: node scripts/apply-assets.mjs
+        run: |
+          set -o pipefail
+          node scripts/apply-assets.mjs 2>&1 | tee -a "$BUILD_LOG"
 
       # 3b. Wire the in-app link handler + Custom Tabs OAuth layer.
       - name: Apply native link & OAuth layer
@@ -65,16 +80,22 @@ jobs:
           SITE_URL:   ${{ inputs.site_url }}
           PACKAGE_ID: ${{ inputs.package_id }}
           APP_NAME:   ${{ inputs.app_name }}
-        run: node scripts/apply-native.mjs
+        run: |
+          set -o pipefail
+          node scripts/apply-native.mjs 2>&1 | tee -a "$BUILD_LOG"
 
       # 4. Hard gate: on-disk resources must hash-match the generated assets.
       - name: Validate icon & splash resources
-        run: node scripts/verify-assets.mjs
+        run: |
+          set -o pipefail
+          node scripts/verify-assets.mjs 2>&1 | tee -a "$BUILD_LOG"
 
       - name: Validate native OAuth / link wiring
         env:
           PACKAGE_ID: ${{ inputs.package_id }}
-        run: node scripts/verify-native.mjs
+        run: |
+          set -o pipefail
+          node scripts/verify-native.mjs 2>&1 | tee -a "$BUILD_LOG"
 
       - name: Show launcher resources (diagnostics)
         run: |
@@ -84,21 +105,24 @@ jobs:
 
       - name: Build debug APK
         working-directory: android
-        run: ./gradlew assembleDebug
+        run: |
+          set -o pipefail
+          ./gradlew assembleDebug 2>&1 | tee -a "$BUILD_LOG"
 
       - name: Rename APK
         run: |
           mkdir -p out
           cp android/app/build/outputs/apk/debug/app-debug.apk "out/${{ inputs.build_id }}.apk"
 
-      # 5. Post-compile proof: the icon inside the APK must match the resource
-      #    we generated, so a packaging quirk can't reintroduce the default.
       - name: Verify icon inside the APK
-        run: node scripts/verify-apk.mjs "out/${{ inputs.build_id }}.apk"
+        run: |
+          set -o pipefail
+          node scripts/verify-apk.mjs "out/${{ inputs.build_id }}.apk" 2>&1 | tee -a "$BUILD_LOG"
 
-      # 6. Post-compile proof for the OAuth layer.
       - name: Verify OAuth wiring inside the APK
-        run: node scripts/verify-apk-oauth.mjs "out/${{ inputs.build_id }}.apk"
+        run: |
+          set -o pipefail
+          node scripts/verify-apk-oauth.mjs "out/${{ inputs.build_id }}.apk" 2>&1 | tee -a "$BUILD_LOG"
 
       - name: Publish APK as GitHub Release asset
         id: release
@@ -126,10 +150,22 @@ jobs:
             -H "X-Sitely-Secret: ${{ inputs.callback_secret }}" \
             -d "{\"build_id\":\"${{ inputs.build_id }}\",\"status\":\"ready\",\"apk_url\":\"${APK_URL}\",\"github_run_id\":\"${{ github.run_id }}\"}"
 
+      # Sends the actual failing lines. No canned diagnosis.
       - name: Notify Sitely (failure)
         if: failure()
         run: |
+          if [ -s "$BUILD_LOG" ]; then
+            RAW="$(grep -a -iE 'error|Error:|FAILURE|Exception|not supported|failed' "$BUILD_LOG" | tail -n 12)"
+            if [ -z "$RAW" ]; then RAW="$(tail -n 20 "$BUILD_LOG")"; fi
+          else
+            RAW="The build failed before any step produced output."
+          fi
+          MSG="$(printf '%s' "$RAW" | tr -d '\000' | sed -e 's/\x1b\[[0-9;]*m//g' | tail -c 1500)"
+          MSG="$MSG
+          (GitHub run ${{ github.run_id }}, failed step reported above)"
+          jq -n --arg id "${{ inputs.build_id }}" --arg msg "$MSG" --arg run "${{ github.run_id }}" \
+            '{build_id:$id,status:"failed",error_message:$msg,github_run_id:$run}' > payload.json
           curl -fsS -X POST "${{ inputs.callback_url }}" \
             -H "Content-Type: application/json" \
             -H "X-Sitely-Secret: ${{ inputs.callback_secret }}" \
-            -d "{\"build_id\":\"${{ inputs.build_id }}\",\"status\":\"failed\",\"error_message\":\"Build failed. See run ${{ github.run_id }}.\",\"github_run_id\":\"${{ github.run_id }}\"}"
+            --data @payload.json
